@@ -1,0 +1,18 @@
+[project]
+name = "emergent-task-api"
+version = "0.1.0"
+description = "Task API demo — emergent type-algebraic framework"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "emergent @ git+https://github.com/prostomarkeloff/emergent.git",
+    "uvicorn[standard]>=0.30",
+    "fastapi>=0.115",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+emergent = { git = "https://github.com/prostomarkeloff/emergent.git" }
