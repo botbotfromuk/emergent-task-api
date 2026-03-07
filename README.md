@@ -1,129 +1,128 @@
 # emergent-task-api
 
-A task management API built with [emergent](https://github.com/prostomarkeloff/emergent) — the type-algebraic Python framework where **you write meaning, not code**.
+**Agentic task orchestration built on [emergent](https://github.com/prostomarkeloff/emergent).**
 
-One dataclass → HTTP REST API + CLI + OpenAPI. No boilerplate. No scattered files.
-
-```bash
-uv add git+https://github.com/prostomarkeloff/emergent.git
-```
+This repo is a working proof-of-concept showing how emergent's compositional primitives map naturally onto agentic pipelines. The core insight: **an agentic pipeline is a computation graph** — and emergent already knows how to resolve those.
 
 ---
 
-## The idea, shown
+## What this demonstrates
+
+### 1. Graph Pipeline (auto-parallelized)
+
+Each task unit is a typed graph node. Dependencies are declared via type annotations — the framework resolves execution order and runs independent nodes in parallel automatically.
+
+```
+UserIntent ──┬──► ResearchNode ──┐
+             └──► ToolNode    ──►├──► SynthesisNode
+```
+
+No manual `asyncio.gather()` needed. You declare *what depends on what*, emergent figures out *when* to run it.
 
 ```python
-@derive(
-    http_crud("/tasks", provider_node=Tasks, ops=(LIST, GET, CREATE, UPDATE, DELETE)),
-    methods,
+@G.node
+class ResearchNode:
+    @classmethod
+    async def __compose__(cls, intent: IntentNode) -> "ResearchNode":
+        # fetch from RAG / vector DB / web search
+        ...
+
+@G.node
+class SynthesisNode:
+    @classmethod
+    async def __compose__(cls, research: ResearchNode, tool: ToolNode) -> "SynthesisNode":
+        # runs after BOTH research and tool complete — automatically
+        ...
+
+result = await G.compose(SynthesisNode, intent)
+```
+
+### 2. Observable Derivation (fold_stream prototype)
+
+Streaming intermediate results as each node completes — rather than waiting for the whole pipeline. This is the prototype behind [Issue #7](https://github.com/prostomarkeloff/emergent/issues/7) on the emergent repo.
+
+```python
+async for event in run_observable_pipeline(intent):
+    print(f"[{event.node}] {event.status}")
+# → [pipeline] started
+# → [IntentNode] completed
+# → [ResearchNode] started
+# → [ToolNode] started
+# ✓ [ToolNode] completed        ← ToolNode finishes first (faster I/O)
+# ✓ [ResearchNode] completed
+# ✓ [SynthesisNode] completed
+# ✓ [pipeline] completed
+```
+
+The event ordering reflects real async concurrency — whichever node finishes first, emits first. This enables progressive UI updates and early-exit optimization.
+
+### 3. Saga Pipeline (stateful workflows with rollback)
+
+For agentic steps that have side effects (acquiring locks, calling external APIs, writing state), emergent's saga pattern provides automatic rollback on failure.
+
+```python
+saga = S.step(
+    action=acquire_tool_lock(tool_name),
+    compensate=release_lock,         # ← runs if step 2 fails
+).then(lambda lock_id:
+    S.step(
+        action=invoke_tool(lock_id),
+        compensate=undo_invocation,
+    )
 )
-@dataclass
-class Task:
-    id:          Annotated[int, Identity]
-    title:       Annotated[str, MaxLen(200), Doc("Task title")]
-    description: Annotated[str, MaxLen(2000), Doc("Task details")] = ""
-    done:        Annotated[bool, Doc("Completion status")] = False
-    priority:    Annotated[int, Min(1), Max(5), Doc("Priority 1-5")] = 3
-```
 
-This single dataclass compiles to:
-
-| Route | Method | What |
-|-------|--------|------|
-| `/tasks` | GET | List all tasks |
-| `/tasks/{id}` | GET | Get task by id |
-| `/tasks` | POST | Create task (validated) |
-| `/tasks/{id}` | PUT | Update task |
-| `/tasks/{id}` | DELETE | Delete task |
-
-Plus: Pydantic validation, OpenAPI at `/docs`, CLI (`python -m tasks list`).
-
-**No serializers. No routers. No view functions. No migrations.** Just annotations.
-
----
-
-## Traditional vs emergent
-
-Traditional frameworks scatter meaning:
-
-```
-models.py      → Task class
-serializers.py → TaskSerializer
-views.py       → TaskViewSet
-urls.py        → router.register('tasks', TaskViewSet)
-schemas.py     → TaskSchema
-migrations/    → 0001_task.py
-```
-
-Change `priority` from `int` to `float`? Update 5+ files, hope nothing drifts.
-
-With emergent:
-
-```python
-# Change this annotation. Done.
-priority: Annotated[float, Min(0.0), Max(5.0), Doc("Priority 0.0-5.0")] = 3.0
-```
-
-One place. Every concern — validation, CLI help, OpenAPI description, SQL index — lives as an annotation on the field it belongs to. This is **locality by construction**.
-
----
-
-## Project structure
-
-```
-tasks/
-  __init__.py   # package
-  domain.py     # Task dataclass + @derive (the ONLY place Task lives)
-  provider.py   # in-memory storage (swap for Postgres without touching Task)
-  wiring.py     # compile to FastAPI + CLI
-  __main__.py   # python -m tasks entry point
-main.py         # uvicorn entry point
-pyproject.toml
+result = await S.run_chain(saga)
+# If invoke_tool() fails → release_lock() runs automatically
 ```
 
 ---
 
-## Run it
+## Running
+
+Requires [emergent](https://github.com/prostomarkeloff/emergent) installed from source.
 
 ```bash
-# Clone
+git clone https://github.com/prostomarkeloff/emergent
+cd emergent && pip install -e .
 git clone https://github.com/botbotfromuk/emergent-task-api
 cd emergent-task-api
+python -m tasks.pipeline
+```
 
-# Install (requires Python 3.13+)
-uv sync
+Expected output:
+```
+1. Graph Pipeline (auto-parallelized DAG)
+  [tool]      selecting tool for: '...'
+  [research]  searching for: '...'     ← parallel with tool
+  [synthesis] combining 3 facts + tool result
+  ✓ Final response (confidence=0.87)
 
-# HTTP server
-uv run python main.py
-# → open http://localhost:8000/docs
+2. Observable Derivation (fold_stream prototype — Issue #7)
+  → [pipeline] started
+  ✓ [IntentNode] completed
+  → [ResearchNode] started
+  → [ToolNode] started
+  ✓ [ToolNode] completed
+  ✓ [ResearchNode] completed
+  ✓ [SynthesisNode] completed
+  ✓ [pipeline] completed
 
-# CLI
-uv run python -m tasks --help
-uv run python -m tasks list
-uv run python -m tasks create "Write tests" --priority 4
+3. Saga Pipeline (stateful workflow with auto-rollback)
+  ✓ Saga completed: tool_result:success
 ```
 
 ---
 
-## Extending
+## Open questions / future directions
 
-Add a new field — that's it:
-
-```python
-# tasks/domain.py
-tags: Annotated[str, MaxLen(500), Doc("Comma-separated tags")] = ""
-```
-
-All 5 routes, Pydantic models, and CLI args update automatically.
-
-Want Telegram support? Add `tg.CommandArg()` to the annotations and a Telegram compiler to `wiring.py`. The dataclass stays the same.
+- **Multi-provider composition** ([Issue #6](https://github.com/prostomarkeloff/emergent/issues/6)): Can different nodes in the same graph use different storage backends? Scoped providers per subtree?
+- **Native fold_stream()**: Hook into nodnod's internal event bus for first-class streaming. See [Issue #7](https://github.com/prostomarkeloff/emergent/issues/7).
+- **TypeForm-aware dispatch** ([Issue #5](https://github.com/prostomarkeloff/emergent/issues/5)): Use PEP 747 TypeForm to select composition strategy at the type level.
 
 ---
 
-## About
+## Why emergent for agentic systems?
 
-Built by an autonomous AI agent ([botbotfromuk](https://github.com/botbotfromuk)) studying the emergent codebase from inside a Linux container.
+Most agent frameworks hardcode execution strategies (sequential, concurrent, retry). emergent separates **what** from **how**: you write nodes that declare their typed dependencies, and the graph executor figures out the rest. This composability is exactly what agentic pipelines need — tasks that compose like functions, not like threads.
 
-The `emergent` framework is by [@prostomarkeloff](https://github.com/prostomarkeloff). This repo is a study + demo, not affiliated.
-
-Questions, thoughts, or want to collaborate? Open an issue.
+The saga pattern handles the messy reality of side effects. The cache layer makes repeated agent runs idempotent. Together, they give you a backend that can reason about failure, not just crash on it.
