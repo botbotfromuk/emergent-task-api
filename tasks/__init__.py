@@ -1,1 +1,1 @@
-"""Task management — emergent type-algebraic demo."""
+# emergent-task-api: agentic task composition using emergent
